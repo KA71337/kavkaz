@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log*
+*.log
+# secrets / local environment (configure them in Render → Environment instead)
+.env
+.env.*
+*.pem
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# scratch files from map analysis / local browser checks
+tools_tmp/
+__pycache__/

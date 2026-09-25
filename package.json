@@ -1,0 +1,24 @@
+{
+  "name": "kavkaz-front",
+  "version": "1.0.0",
+  "description": "Браузерная многопользовательская стратегия о захвате провинций Кавказа",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test",
+    "build:map": "python tools/build_map_data.py"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "compression": "^1.8.0",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}
