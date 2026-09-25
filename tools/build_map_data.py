@@ -396,7 +396,7 @@ borders = shared_borders(lab)
 
 COUNTRY_ORDER = ['georgia', 'abkhazia', 'south_ossetia', 'armenia', 'azerbaijan', 'artsakh', 'nakhchivan']
 COUNTRY_SHORT = {
-    'georgia': 'Грузия', 'abkhazia': 'Абхазия', 'south_ossetia': 'Южная Осетия', 'armenia': 'Армения',
+    'georgia': 'Грузия', 'abkhazia': 'Абхазия', 'south_ossetia': 'Южная Осетия', 'armenia': 'Полгонустан',
     'azerbaijan': 'Азербайджан', 'artsakh': 'Нагорный Карабах', 'nakhchivan': 'Нахичевань',
 }
 

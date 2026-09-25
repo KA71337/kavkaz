@@ -282,7 +282,7 @@ export class GameRoom {
   }
 
   /**
-   * After a capture: a country that has no province left is eliminated ("АРМЕНИЯ ЗАХВАЧЕНА" for everyone).
+   * After a capture: a country that has no province left is eliminated ("ПОЛГОНУСТАН ЗАХВАЧЕН" for everyone).
    * Independently, when the attacker now holds every province of a region (the original territory of a
    * country, e.g. all NK_* provinces) while that country still survives elsewhere, a region event is sent.
    */

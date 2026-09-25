@@ -43,7 +43,7 @@ const FLAGS = {
       }).join(''),
   ),
   south_ossetia: svg(stripes(['#f9f9f9', '#de0212', '#fcd504'])),
-  armenia: svg(stripes(['#db020e', '#012f9d', '#f79502'])),
+  armenia: null, // Polgonustan: raster flag, see FLAG_IMAGES below
   azerbaijan: svg(
     stripes(['#01a0d6', '#df022d', '#08a052']) +
       `<circle cx="14" cy="10" r="3" fill="#fff"/><circle cx="14.8" cy="10" r="2.45" fill="#df022d"/>` +
@@ -57,12 +57,27 @@ const FLAGS = {
 };
 FLAGS.nakhchivan = FLAGS.azerbaijan;
 
+// Raster flags (served by server/index.js from the repository root). 'armenia' is the internal id of
+// Polgonustan; its flag is the image `полгонустан.jpeg` (3:2, same proportions as the SVG flags).
+export const FLAG_IMAGES = {
+  armenia: '/assets/flags/polgonustan.jpeg',
+};
+for (const [id, url] of Object.entries(FLAG_IMAGES)) {
+  FLAGS[id] = svg(`<image href="${url}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>`);
+}
+
+/** SVG markup of a flag; meant to be inlined into the document (the map uses it as a territory texture). */
 export function flagSvg(countryId) {
   return FLAGS[countryId] || svg(`<rect width="${W}" height="${H}" fill="#777"/>`);
 }
 
 const cache = new Map();
+/**
+ * URL usable in CSS / <img>. Raster flags return their direct URL: browsers don't load external images
+ * referenced from inside an SVG that is itself used as an image (data: URI in background-image).
+ */
 export function flagDataUri(countryId) {
+  if (FLAG_IMAGES[countryId]) return FLAG_IMAGES[countryId];
   if (!cache.has(countryId)) {
     cache.set(countryId, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(flagSvg(countryId))}`);
   }

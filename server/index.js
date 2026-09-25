@@ -42,6 +42,8 @@ export function createServer({ roomOptions } = {}) {
   });
   // The original map from the repository root is the game's visual base layer.
   app.get('/assets/map.png', (_req, res) => res.sendFile(path.join(ROOT, 'image.png'), staticOpts));
+  // Flag of Polgonustan (shown for the country with internal id 'armenia'), taken from the repository root.
+  app.get('/assets/flags/polgonustan.jpeg', (_req, res) => res.sendFile(path.join(ROOT, 'полгонустан.jpeg'), staticOpts));
   app.get('/data/map.json', (_req, res) => res.sendFile(MAP_FILE, staticOpts));
   app.use('/shared', express.static(path.join(ROOT, 'shared'), staticOpts));
   app.use(express.static(path.join(ROOT, 'public'), staticOpts));

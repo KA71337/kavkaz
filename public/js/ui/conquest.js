@@ -1,4 +1,4 @@
-// Full-screen announcement "АРМЕНИЯ ЗАХВАЧЕНА" (server event `conquest`, sent to every player of the room).
+// Full-screen announcement "ПОЛГОНУСТАН ЗАХВАЧЕН" (server event `conquest`, sent to every player of the room).
 // The server emits it only when the country has no province left (type "eliminated") or when a surviving
 // country has lost all provinces of its original territory (type "region", e.g. every NK_* province).
 import { COUNTRY_BY_ID } from '/shared/countries.js';
