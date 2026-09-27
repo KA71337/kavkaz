@@ -130,7 +130,7 @@ test('full conquest is announced to every player; only changed provinces travel 
     c.on('conquest', (e) => c.conquests.push(e));
   }
   const nk = Object.keys(a.state.provinces).filter((id) => id.startsWith('NK_'));
-  assert.equal(nk.length, 6);
+  assert.equal(nk.length, 4);
   for (let i = 0; i < nk.length; i++) {
     room.countries.get('azerbaijan').troops = 30000;
     const front = nk.filter((id) => a.state.provinces[id] === 'artsakh' && room.bordersProvince('azerbaijan', id));

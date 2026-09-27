@@ -11,6 +11,8 @@ import { registerSocketHandlers, channel } from './net/socketHandlers.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..');
 const PORT = Number(process.env.PORT) || 3000;
+export const MAP_IMAGE = path.join(ROOT, 'новая карта.png');
+export const MAP_IMAGE_WEB = path.join(ROOT, 'data', 'map.webp');
 
 /** @param {{roomOptions?: object}} [opts] roomOptions are forwarded to every GameRoom (used by tests). */
 export function createServer({ roomOptions } = {}) {
@@ -40,8 +42,10 @@ export function createServer({ roomOptions } = {}) {
     }
     res.set('Cache-Control', 'no-store').json({ iceServers });
   });
-  // The original map from the repository root is the game's visual base layer.
-  app.get('/assets/map.png', (_req, res) => res.sendFile(path.join(ROOT, 'image.png'), staticOpts));
+  // The map from the repository root (`новая карта.png`) is the game's visual base layer. Browsers get
+  // its pixel-identical lossless WebP copy (data/map.webp, written by tools/build_map_data.py).
+  app.get('/assets/map.webp', (_req, res) => res.sendFile(MAP_IMAGE_WEB, staticOpts));
+  app.get('/assets/map.png', (_req, res) => res.sendFile(MAP_IMAGE, staticOpts));
   // Flag of Polgonustan (shown for the country with internal id 'armenia'), taken from the repository root.
   app.get('/assets/flags/polgonustan.jpeg', (_req, res) => res.sendFile(path.join(ROOT, 'полгонустан.jpeg'), staticOpts));
   app.get('/data/map.json', (_req, res) => res.sendFile(MAP_FILE, staticOpts));

@@ -1,6 +1,16 @@
-// Mouse / touch / pen pan & zoom for an SVG via its viewBox (no layout thrashing, crisp at any zoom).
+// Mouse / touch / pen pan & zoom for an SVG via its viewBox (crisp at any zoom).
+//
+// Performance: re-rendering the SVG (map image, ~190 provinces, ~1000 dotted border lines) on every
+// frame of a gesture is what made phones stutter. During a gesture the already rendered map is only
+// moved with a compositor-only CSS transform (translate + scale, GPU); the viewBox is written - and the
+// SVG re-rendered - once when the gesture ends (or when the gesture drifts so far that blank edges would
+// show). The map image and the province overlay live in the same SVG, so they can never drift apart.
 
 const TAP_SLOP = 8;
+const WHEEL_COMMIT_MS = 160; // wheel / trackpad zoom: re-render after the wheel stops
+const MAX_BLANK = 0.12;      // re-render mid-gesture when >12% of the view would be uncovered
+const MAX_K = 2.2;           // ... or when the scaled-up raster would look too blurry
+const MIN_COMMIT_GAP = 150;  // ... but not more often than this during one gesture
 
 export class PanZoom {
   constructor(svg, bounds, { maxScale = 8, onTap, onHover, onChange } = {}) {
@@ -24,11 +34,11 @@ export class PanZoom {
   }
 
   /**
-   * Cached client rect of the svg. Reading getBoundingClientRect on every pointermove right after a
-   * viewBox write forces a style/layout flush; the box itself only changes on resize (ResizeObserver).
+   * Cached client rect of the map viewport. Measured on the container: the svg itself carries the gesture
+   * transform, so its own rect is not the viewport. The box only changes on resize (ResizeObserver).
    */
   rect(fresh = false) {
-    if (fresh || !this._rect || !this._rect.width) this._rect = this.svg.getBoundingClientRect();
+    if (fresh || !this._rect || !this._rect.width) this._rect = (this.svg.parentElement || this.svg).getBoundingClientRect();
     return this._rect;
   }
 
@@ -48,22 +58,62 @@ export class PanZoom {
     }
   }
 
+  /** Commit: render the current view (viewBox write) and drop the gesture transform. */
   apply() {
     cancelAnimationFrame(this._raf);
     this._raf = 0;
+    clearTimeout(this._commitT);
     if (![this.vb.x, this.vb.y, this.vb.w, this.vb.h].every(Number.isFinite)) this.vb = { ...this.bounds };
     const { x, y, w, h } = this.vb;
     this.svg.setAttribute('viewBox', `${x.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)}`);
+    this.committed = { ...this.vb };
+    this._committedAt = performance.now();
+    if (this._tf) {
+      this.svg.style.transform = '';
+      this._tf = false;
+    }
     this.onChange(this.pxScale());
   }
 
-  /** Gesture updates: many pointermove events per frame collapse into one viewBox write. */
-  applySoon() {
+  /**
+   * Gesture frame: show the current view by transforming the view rendered at the last commit.
+   * A point p is drawn at o(C) + (p - C)·s(C) and must appear at o(V) + (p - V)·s(V) (C = committed,
+   * V = current viewBox, s = px per unit, o = letterbox offset of preserveAspectRatio="xMidYMid meet").
+   */
+  preview() {
+    const C = this.committed;
+    const r = this.rect();
+    if (!C || !r.width || !r.height) return this.apply();
+    const V = this.vb;
+    const sC = Math.min(r.width / C.w, r.height / C.h);
+    const sV = Math.min(r.width / V.w, r.height / V.h);
+    const k = sV / sC;
+    const tx = (r.width - V.w * sV) / 2 + (C.x - V.x) * sV - ((r.width - C.w * sC) / 2) * k;
+    const ty = (r.height - V.h * sV) / 2 + (C.y - V.y) * sV - ((r.height - C.h * sC) / 2) * k;
+    const blankX = Math.max(0, tx) + Math.max(0, r.width - (tx + r.width * k));
+    const blankY = Math.max(0, ty) + Math.max(0, r.height - (ty + r.height * k));
+    // Drifted too far from the rendered view: re-render, but at most every MIN_COMMIT_GAP ms (a fast
+    // zoom-out would otherwise re-render on every frame, exactly what the transform is there to avoid).
+    const now = performance.now();
+    if ((k > MAX_K || blankX > r.width * MAX_BLANK || blankY > r.height * MAX_BLANK) && now - (this._committedAt || 0) > MIN_COMMIT_GAP) {
+      return this.apply();
+    }
+    this.svg.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${k.toFixed(5)})`;
+    this._tf = true;
+  }
+
+  /** Many pointermove / wheel events per frame collapse into one transform write. */
+  previewSoon() {
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
-      this.apply();
+      this.preview();
     });
+  }
+
+  commitSoon(ms) {
+    clearTimeout(this._commitT);
+    this._commitT = setTimeout(() => this.apply(), ms);
   }
 
   /** screen pixels per svg unit (preserveAspectRatio = meet) */
@@ -111,11 +161,11 @@ export class PanZoom {
     this.vb.w = nw;
     this.vb.h *= f;
     this.clamp();
-    if (render) this.applySoon();
+    if (render) this.previewSoon();
   }
 
   zoomCenter(factor) {
-    const r = this.svg.getBoundingClientRect();
+    const r = this.rect(true);
     this.animateTo(null, factor, r.left + r.width / 2, r.top + r.height / 2);
   }
 
@@ -124,7 +174,7 @@ export class PanZoom {
     this.vb.x -= dxPx / s;
     this.vb.y -= dyPx / s;
     this.clamp();
-    this.applySoon();
+    this.previewSoon();
   }
 
   /** Show `rect` (svg units) with padding, animated. */
@@ -183,9 +233,13 @@ export class PanZoom {
         w: from.w + (to.w - from.w) * e,
         h: from.h + (to.h - from.h) * e,
       };
-      if (k === 1) this.clamp();
-      this.apply();
-      if (k < 1) this._anim = requestAnimationFrame(step);
+      if (k === 1) {
+        this.clamp();
+        this.apply(); // one re-render at the end of the animation
+      } else {
+        this.preview();
+        this._anim = requestAnimationFrame(step);
+      }
     };
     this._anim = requestAnimationFrame(step);
   }
@@ -240,6 +294,8 @@ export class PanZoom {
         const g = this.gesture;
         el.classList.remove('dragging');
         this.gesture = null;
+        // gesture over (or an animation interrupted by the touch): render the final view once
+        if (this._tf || this._raf) this.apply();
         if (g && !g.moved && !g.pinch && e.type === 'pointerup') this.onTap(g.target, e);
       }
     };
@@ -256,6 +312,7 @@ export class PanZoom {
         cancelAnimationFrame(this._anim);
         const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
         this.zoomAt(Math.pow(1.0018, delta), e.clientX, e.clientY);
+        this.commitSoon(WHEEL_COMMIT_MS);
       },
       { passive: false },
     );
@@ -263,8 +320,9 @@ export class PanZoom {
       e.preventDefault();
       this.animateTo(null, 0.5, e.clientX, e.clientY);
     });
-    // Fires on window resize, orientation change and when the game screen becomes visible.
-    const onResize = () => {
+    // Fires on window resize, orientation change, fullscreen and when the game screen becomes visible.
+    // Rotating a phone produces a burst of resizes: recalculate once after it settles.
+    const recalc = () => {
       if (!this.viewAspect()) return;
       const pending = this._pending;
       this._pending = null;
@@ -272,7 +330,14 @@ export class PanZoom {
       this.clamp();
       this.apply();
     };
-    if (typeof ResizeObserver === 'function') new ResizeObserver(onResize).observe(el);
+    const onResize = () => {
+      this._rect = null;
+      clearTimeout(this._resizeT);
+      // first appearance of the map (pending reset/focus) is handled at once, later bursts are debounced
+      if (this._pending) return recalc();
+      this._resizeT = setTimeout(recalc, 120);
+    };
+    if (typeof ResizeObserver === 'function') new ResizeObserver(onResize).observe(el.parentElement || el);
     else window.addEventListener('resize', onResize);
   }
 }

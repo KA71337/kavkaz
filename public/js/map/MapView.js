@@ -1,6 +1,8 @@
-// Map layers on top of the original map image:
-//  - territory: every owner's flag is ONE texture stretched over the bounding box of the owner's whole
-//    current territory and clipped to its provinces (so captured land continues the conqueror's flag);
+// Map layers on top of the original map image (`новая карта.png`, shown pixel for pixel):
+//  - territory: a country whose territory changed (it captured land) is painted with ONE flag texture
+//    stretched over the bounding box of its whole current territory and clipped to its provinces, so
+//    captured land continues the conqueror's flag. Untouched territory is not painted at all: there the
+//    source image itself is visible (exact colours / flags of the map, and nothing to rasterise);
 //  - borders: dotted province borders, stronger borders between different owners;
 //  - interactive province hit-areas, labels and battle markers.
 import { flagSvg } from '/shared/flags.js';
@@ -56,7 +58,7 @@ export class MapView {
     }
 
     // 1) the source map is the visual base layer (sea, outline)
-    el('image', { href: '/assets/map.png', x: 0, y: 0, width: W, height: H, preserveAspectRatio: 'none' }, svg);
+    el('image', { href: '/assets/map.webp', x: 0, y: 0, width: W, height: H, preserveAspectRatio: 'none', decoding: 'async' }, svg);
     // 2) territory filled with the owner's flag texture
     this.gTerritory = el('g', { class: 'territory' }, svg);
     for (const p of this.map.provinces) {
@@ -87,6 +89,8 @@ export class MapView {
       },
       onHover: (target) => {
         const id = target?.closest?.('[data-id]')?.getAttribute('data-id');
+        // troops change every tick: refresh only the tooltip of the province under the mouse
+        if (id && this.state) this.setTitle(this.byId.get(id), this.state);
         this.onProvinceHover(id || null);
       },
       onChange: (s) => this.onScale(s),
@@ -141,6 +145,7 @@ export class MapView {
    */
   render(state, ctx) {
     if (!state) return;
+    this.state = state;
     const { mode, me } = ctx;
     for (const p of this.map.provinces) {
       const path = this.pathEls.get(p.id);
@@ -175,9 +180,11 @@ export class MapView {
   }
 
   /**
-   * Fill every province with its owner's flag. The flag of a country is a single texture spanning the
-   * bounding box of ALL provinces it currently owns, so neighbouring provinces (original or captured)
-   * show one continuous flag clipped to the territory's shape - never a repeated per-province flag.
+   * Paint the territory of every country that captured land with its flag. The flag of such a country is
+   * a single texture spanning the bounding box of ALL provinces it currently owns, so its provinces
+   * (original and captured) show one continuous flag clipped to the territory's shape - never a repeated
+   * per-province flag. Countries that only hold (part of) their original land stay unpainted: the source
+   * image already shows their flag there. Only elements whose paint actually changed are touched.
    */
   renderTerritory(state, sig) {
     if (sig === this.territorySig) return;
@@ -185,31 +192,43 @@ export class MapView {
     this.ownersGen = (this.ownersGen || 0) + 1;
     const PAD = 2; // province fills get a thin same-texture stroke to hide seams; keep it inside the tile
     const owned = new Map();
+    const grown = new Set(); // countries holding at least one province that is not originally theirs
     for (const p of this.map.provinces) {
       const owner = state.provinces[p.id];
       if (!owned.has(owner)) owned.set(owner, []);
       owned.get(owner).push(p.id);
+      if (owner !== p.country) grown.add(owner);
     }
-    for (const [owner, pids] of owned) {
+    for (const owner of grown) {
       const f = this.flagArt.get(owner);
-      const r = this.bboxOf(pids);
+      const r = this.bboxOf(owned.get(owner));
       if (!f || !r) continue;
       const x = r.x - PAD, y = r.y - PAD, w = r.w + 2 * PAD, h = r.h + 2 * PAD;
+      const key = `${x},${y},${w},${h}`;
+      if (f.key === key) continue; // territory of this country did not change
+      f.key = key;
       for (const [k, v] of Object.entries({ x, y, width: w, height: h })) f.pattern.setAttribute(k, v);
       f.art.setAttribute('width', w);
       f.art.setAttribute('height', h);
     }
     for (const p of this.map.provinces) {
       const owner = state.provinces[p.id];
-      const paint = this.flagArt.has(owner) ? `url(#flag-${owner})` : '#777';
-      const style = `fill:${paint};stroke:${paint}`;
+      const paint = grown.has(owner) ? (this.flagArt.has(owner) ? `url(#flag-${owner})` : '#777') : null;
+      const style = paint ? `fill:${paint};stroke:${paint}` : 'display:none';
       const t = this.terrEls.get(p.id);
       if (t.getAttribute('style') !== style) t.setAttribute('style', style);
-      // hover tooltip: "Карабах · Север (NK_01) / Владелец: …"
-      const title = `${p.name} (${p.id})\nВладелец: ${COUNTRY_BY_ID[owner]?.name ?? owner}`;
-      const tEl = this.titleEls.get(p.id);
-      if (tEl.textContent !== title) tEl.textContent = title;
+      this.setTitle(p, state);
     }
+  }
+
+  /** Hover tooltip: province, owner and the owner's troops. */
+  setTitle(p, state) {
+    const owner = state.provinces[p.id];
+    const troops = state.countries[owner]?.troops;
+    const title = `${p.name} (${p.id})\nВладелец: ${COUNTRY_BY_ID[owner]?.name ?? owner}` +
+      (troops != null ? `\nВойска: ${troops.toLocaleString('ru-RU')}` : '');
+    const tEl = this.titleEls.get(p.id);
+    if (tEl.textContent !== title) tEl.textContent = title;
   }
 
   /**

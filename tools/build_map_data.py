@@ -1,20 +1,24 @@
 """Build game map data (provinces, owners, adjacency) from the source map image.
 
-The source map (image.png in the repository root) shows every country filled
-with its flag and every province outlined with a thin dark border line.  This
-script turns that picture into game data without redrawing the map:
+The source map (`новая карта.png` in the repository root) shows every territory filled with its flag
+and every province outlined with a thin dark *dotted* line. This script turns that picture into game
+data without redrawing the map:
 
-1. Thin dark lines are detected with a morphological black-hat filter and the
-   land is split into connected regions along them.
-2. Regions that were separated only by flag artwork (stripe transitions,
-   Georgian crosses, the Azerbaijani crescent, ...) are merged back.  Such
-   edges have different colours on both sides but no near-black pixels.
-3. Every region is classified into a country using its flag colours and
-   position, polygons / label points / neighbours / shared borders are
-   extracted and written to data/map.json.
+1. Dark dots are detected with a morphological black-hat filter; the dots are joined into closed lines
+   (dilation) and the land is split into connected regions along them.
+2. Regions whose lines are too faint / broken to close (e.g. the red stripe of Azerbaijan, which is
+   crossed by the crescent) are divided by a seeded priority flood over the line relief, so basins meet
+   exactly on the visible lines. Other oversized regions are split the same way from seeds found
+   automatically (cores of the distance transform from the lines).
+3. Tiny fragments are absorbed by a neighbour, every region is assigned to a territory (flag colours +
+   position), polygons / label points / neighbours / shared borders are extracted and written to
+   data/map.json. Coordinates are pixels of the source image (SVG viewBox = image size).
+4. A pixel-identical lossless WebP copy of the image (data/map.webp, ~25% smaller than the PNG) is
+   written for the browser.
 
-Usage:  python tools/build_map_data.py   (requires numpy, opencv-python, pillow)
+Usage:  python tools/build_map_data.py [--dump]   (requires numpy, opencv-python, pillow)
 """
+import heapq
 import json
 import os
 import sys
@@ -24,27 +28,26 @@ import numpy as np
 from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, 'image.png')
+SRC = os.path.join(ROOT, 'новая карта.png')
 OUT = os.path.join(ROOT, 'data', 'map.json')
+DUMP = '--dump' in sys.argv
 
-# segmentation parameters (tuned for image.png)
-T_LINE = 20        # black-hat response that counts as a (possible) border line
-LINE_DIL = 3       # closes 1-2px gaps in border lines
-MIN_SEED = 120     # minimal area of a seed region
-DIFF = 90          # colour difference that marks a flag-artwork edge
-WEAK = 72          # flag-artwork edges are weaker than this (black-hat)
-DARK = 90          # ... and contain no pixel darker than this
+# segmentation parameters (tuned for the new map)
+T_LINE = 30        # black-hat response of a border dot
+LINE_DIL = 5       # joins the dots of a dotted line (gaps up to ~4 px)
+MIN_SEED = 80      # minimal area of a seed region
 TINY = 700         # smaller regions are absorbed by a neighbour
+SPLIT_AREA = 7000  # larger regions are checked for lines that did not close
+SPLIT_T = 20       # ... using weaker dots
+SPLIT_D = 6.0      # ... a pocket must be at least 2*SPLIT_D px wide
+SPLIT_CORE = 300   # ... and its core at least this many px
 
 a = np.array(Image.open(SRC).convert('RGB')).astype(np.uint8)
 H, W = a.shape[:2]
 mx = a.max(axis=2)
 ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-bh_mx = cv2.morphologyEx(mx, cv2.MORPH_BLACKHAT, ker)
-bh_ch = np.max([cv2.morphologyEx(a[:, :, c], cv2.MORPH_BLACKHAT, ker) for c in range(3)], axis=0)
-bh_mx_d = cv2.dilate(bh_mx, np.ones((5, 5), np.uint8)).astype(np.float32)
-bh_ch_d = cv2.dilate(bh_ch, np.ones((5, 5), np.uint8)).astype(np.float32)
-mx_e = cv2.erode(mx, np.ones((5, 5), np.uint8)).astype(np.float32)
+bh = cv2.morphologyEx(mx, cv2.MORPH_BLACKHAT, ker)
+relief = cv2.GaussianBlur(bh.astype(np.float32), (0, 0), 0.8)
 
 # ---------------------------------------------------------------- land mask
 dark = (mx < 50).astype(np.uint8)
@@ -55,8 +58,8 @@ land = (~outside).astype(np.uint8)
 land = cv2.morphologyEx(land, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
 # ------------------------------------------------------------- seed regions
-border = ((bh_mx > T_LINE) | (mx < 50)).astype(np.uint8)
-border = cv2.dilate(border, np.ones((LINE_DIL, LINE_DIL), np.uint8))
+border = ((bh > T_LINE) | (mx < 50)).astype(np.uint8)
+border = cv2.dilate(border, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (LINE_DIL, LINE_DIL)))
 mask = ((1 - border) & land).astype(np.uint8)
 n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=4)
 keep = np.zeros(n, bool)
@@ -80,60 +83,88 @@ def grow(lab):
     return lab
 
 
+def flood(region, seeds, base, relief=relief):
+    """Seeded priority flood (Meyer) inside `region` over the line relief; returns new labels."""
+    out = np.zeros(lab.shape, np.int32)
+    heap = []
+    for k, (sx, sy) in enumerate(seeds):
+        if not region[sy, sx]:
+            raise SystemExit(f'seed ({sx},{sy}) lies outside its region')
+        out[sy, sx] = base + k
+        heapq.heappush(heap, (0.0, sx, sy, base + k))
+    while heap:
+        _, x, y, nid = heapq.heappop(heap)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < W and 0 <= ny < H and region[ny, nx] and not out[ny, nx]:
+                out[ny, nx] = nid
+                heapq.heappush(heap, (float(relief[ny, nx]), nx, ny, nid))
+    # every part must stay one connected piece (detached crumbs go back to the flood of a neighbour)
+    for nid in range(base, base + len(seeds)):
+        part = (out == nid).astype(np.uint8)
+        k, pl, ps, _ = cv2.connectedComponentsWithStats(part, connectivity=4)
+        if k > 2:
+            big = 1 + int(np.argmax(ps[1:, cv2.CC_STAT_AREA]))
+            out[(part > 0) & (pl != big)] = 0
+    return out
+
+
+def chevron_relief(region):
+    """Line relief where the outlined white chevron of the Karabakh flag is a ridge along its centre line,
+    so the parts on both sides meet in the middle of the chevron (it has no dark line on its east side)."""
+    white = ((a.min(axis=2) > 200) & region).astype(np.uint8)
+    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    wd = cv2.distanceTransform(white, cv2.DIST_L2, 5)
+    return np.where(white > 0, 150.0 + 20.0 * wd, relief).astype(np.float32)
+
+
+def split(lab, point, seeds, relief_fn=None):
+    region = lab == lab[point[1], point[0]]
+    out = flood(region, seeds, int(lab.max()) + 1, relief_fn(region) if relief_fn else relief)
+    lab = np.where(region, out, lab)
+    return grow(np.where(lab > 0, lab, 0)), sorted(set(np.unique(out).tolist()) - {0})
+
+
 lab = grow(lab)
 
+# ------------------------------------ explicit splits (lines too broken to close)
+# Nagorno-Karabakh: one closed outline; the parts inside are divided by weak lines and by the
+# stripe / chevron seams of the flag. Every part becomes a separate province NK_01 ... NK_04.
+NK_POINT = (915, 720)
+NK_SEEDS = [
+    # (id, name, seed x, seed y)
+    ('NK_01', 'Карабах · Север', 915, 680),
+    ('NK_02', 'Карабах · Запад', 865, 735),
+    ('NK_03', 'Карабах · Центр', 925, 770),  # wedge between the dotted line (x≈910) and the chevron
+    ('NK_04', 'Карабах · Восток', 968, 745),
+]
+lab, nk_ids = split(lab, NK_POINT, [(x, y) for _, _, x, y in NK_SEEDS], chevron_relief)
+NK_PARTS = dict(zip(nk_ids, NK_SEEDS))
+# the red stripe of Azerbaijan: dotted lines are interrupted by the crescent and the star
+AZ_RED_POINT = (1105, 675)
+AZ_RED_SEEDS = [(985, 690), (1135, 620), (1200, 670), (1120, 735)]
+lab, _ = split(lab, AZ_RED_POINT, AZ_RED_SEEDS)
+explicit = set(nk_ids) | {int(lab[y, x]) for x, y in AZ_RED_SEEDS}
 
-def boundary_samples(lab):
-    """Yield (p, q, y, x, colour_p, colour_q) for every 4-neighbour label change."""
-    res = []
-    o = 5
-    for dy, dx in ((0, 1), (1, 0)):
-        A = lab[:H - dy, :W - dx]
-        B = lab[dy:, dx:]
-        m = (A != B) & (A > 0) & (B > 0)
+# ---------------------------------------- automatic splits of oversized regions
+ids, cnt = np.unique(lab[lab > 0], return_counts=True)
+for i, c in zip(ids.tolist(), cnt.tolist()):
+    if c < SPLIT_AREA or i in explicit:
+        continue
+    m = (lab == i).astype(np.uint8)
+    lines = ((bh > SPLIT_T) & (m > 0)).astype(np.uint8)
+    free = (m & (1 - cv2.dilate(lines, np.ones((3, 3), np.uint8)))).astype(np.uint8)
+    dist = cv2.distanceTransform(np.pad(free, 1), cv2.DIST_L2, 5)[1:-1, 1:-1]
+    k, cl, st, cen = cv2.connectedComponentsWithStats((dist >= SPLIT_D).astype(np.uint8), connectivity=4)
+    seeds = []
+    for j in range(1, k):
+        if st[j, cv2.CC_STAT_AREA] >= SPLIT_CORE:
+            yy, xx = np.nonzero(cl == j)
+            t = int(np.argmax(dist[yy, xx]))  # deepest point of the core
+            seeds.append((int(xx[t]), int(yy[t])))
+    if len(seeds) > 1:
         ys, xs = np.nonzero(m)
-        va, vb = A[m], B[m]
-        ya = np.clip(ys - o * dy, 0, H - 1)
-        xa = np.clip(xs - o * dx, 0, W - 1)
-        yb = np.clip(ys + dy + o * dy, 0, H - 1)
-        xb = np.clip(xs + dx + o * dx, 0, W - 1)
-        res.append((va, vb, ys, xs, dy, dx, lab[ya, xa] == va, lab[yb, xb] == vb,
-                    a[ya, xa].astype(int), a[yb, xb].astype(int)))
-    return res
-
-
-def pair_info(lab):
-    recs = {}
-    for va, vb, ys, xs, dy, dx, okA, okB, colA, colB in boundary_samples(lab):
-        for i in range(len(ys)):
-            p, q = int(va[i]), int(vb[i])
-            ca, cb, oa, ob = colA[i], colB[i], okA[i], okB[i]
-            if p > q:
-                p, q, ca, cb, oa, ob = q, p, cb, ca, ob, oa
-            r = recs.get((p, q))
-            if r is None:
-                r = recs[(p, q)] = {'mx': [], 'ch': [], 'dk': [], 'y': [], 'ca': [], 'cb': []}
-            y, x = ys[i], xs[i]
-            r['mx'].append(bh_mx_d[y, x])
-            r['ch'].append(bh_ch_d[y, x])
-            r['dk'].append(mx_e[y, x])
-            r['y'].append(y)
-            if oa:
-                r['ca'].append(ca)
-            if ob:
-                r['cb'].append(cb)
-    out = []
-    for k, r in recs.items():
-        if len(r['mx']) < 5:
-            continue
-        diff = 0.0
-        if r['ca'] and r['cb']:
-            diff = float(np.abs(np.median(np.array(r['ca']), axis=0) - np.median(np.array(r['cb']), axis=0)).sum())
-        hist = np.bincount(np.array(r['y']))
-        band = max(hist[max(0, i - 2):i + 3].sum() for i in range(len(hist))) / len(r['y'])
-        out.append(dict(p=k[0], q=k[1], len=len(r['mx']), mx=float(np.median(r['mx'])),
-                        ch=float(np.median(r['ch'])), dk=float(np.median(r['dk'])), diff=diff, band=band))
-    return out
+        lab, _ = split(lab, (int(xs[0]), int(ys[0])), seeds)
 
 
 def areas_of(lab):
@@ -141,184 +172,122 @@ def areas_of(lab):
     return dict(zip(ids.tolist(), cnt.tolist()))
 
 
-def apply_parent(lab, parent):
-    def root(x):
-        seen = set()
-        while x in parent and x not in seen:
-            seen.add(x)
-            x = parent[x]
-        return x
-    remap = np.arange(lab.max() + 1)
-    for i in range(1, lab.max() + 1):
-        remap[i] = root(i)
-    return remap[lab]
+def contact_lengths(lab):
+    """{(p, q): number of 4-neighbour pixel pairs on the boundary between p and q}, p < q."""
+    res = {}
+    for dy, dx in ((0, 1), (1, 0)):
+        A = lab[:H - dy, :W - dx]
+        B = lab[dy:, dx:]
+        m = (A != B) & (A > 0) & (B > 0)
+        p = np.minimum(A[m], B[m]).astype(np.int64)
+        q = np.maximum(A[m], B[m]).astype(np.int64)
+        key = p * 100000 + q
+        u, c = np.unique(key, return_counts=True)
+        for kk, cc in zip(u.tolist(), c.tolist()):
+            res[(kk // 100000, kk % 100000)] = res.get((kk // 100000, kk % 100000), 0) + cc
+    return res
 
-
-# ------------------------------------------- merge flag-artwork fragments
-for _ in range(3):
-    info = pair_info(lab)
-    area = areas_of(lab)
-    cand = {}
-    for e in info:
-        stripe = e['ch'] < 20                                  # channel-swapping stripe edge
-        artwork = e['diff'] > DIFF and e['dk'] > DARK and e['mx'] < WEAK
-        hstripe = e['diff'] > DIFF and e['band'] >= 0.95 and e['ch'] < 45 and e['dk'] > 55
-        if stripe or artwork or hstripe:
-            s, t = (e['p'], e['q']) if area[e['p']] <= area[e['q']] else (e['q'], e['p'])
-            if s not in cand or cand[s][0] < e['len']:
-                cand[s] = (e['len'], t)
-    if not cand:
-        break
-    # every region is absorbed by at most one larger neighbour -> no chain bridging
-    lab = apply_parent(lab, {s: t for s, (_, t) in cand.items()})
 
 # ------------------------------------------------ absorb tiny fragments
-for _ in range(5):
+for _ in range(6):
     area = areas_of(lab)
     best = {}
-    for e in pair_info(lab):
-        for s, t in ((e['p'], e['q']), (e['q'], e['p'])):
-            if area.get(s, 0) < TINY and (s not in best or best[s][0] < e['len']):
-                best[s] = (e['len'], t)
+    for (p, q), ln in contact_lengths(lab).items():
+        for s, t in ((p, q), (q, p)):
+            if area.get(s, 0) < TINY and area.get(t, 0) >= area.get(s, 0) and (s not in best or best[s][0] < ln):
+                best[s] = (ln, t)
     if not best:
         break
-    lab = apply_parent(lab, {s: t for s, (_, t) in best.items()})
-
-# --------------------------------------------------------- colour classes
-R, G, B = a[..., 0].astype(int), a[..., 1].astype(int), a[..., 2].astype(int)
-CLS = {
-    'W': (R > 200) & (G > 200) & (B > 200),                     # white
-    'rG': (R > 180) & (G < 60) & (B < 33),                      # Georgian / Armenian red
-    'rA': (R > 180) & (G < 60) & (B >= 33),                     # Azerbaijani red
-    'Y': (R > 220) & (G > 185) & (B < 90),                      # South Ossetian yellow
-    'O': (R > 210) & (G > 110) & (G <= 185) & (B < 70),         # Armenian orange
-    'lB': (R < 60) & (G > 120) & (B > 170),                     # Azerbaijani blue
-    'dB': (R < 60) & (G < 90) & (B > 110),                      # Armenian blue
-    'Gr': (R < 70) & (G > 120) & (B < 130),                     # green
-}
-
-
-def fractions(m):
-    tot = max(1, int(m.sum()))
-    return {k: float((v & m).sum()) / tot for k, v in CLS.items()}
-
-
-def label_at(x, y):
-    return int(lab[y, x])
-
-
-# Nakhchivan and Vayots Dzor are not separated by a closed line on the map:
-# split that region by flag colour (Armenian orange vs Azerbaijani flag).
-nakh = label_at(700, 860)
-m = lab == nakh
-fr = fractions(m)
-if fr['O'] > 0.15 and (fr['lB'] + fr['Gr'] + fr['rA']) > 0.15:
-    orange = cv2.GaussianBlur(CLS['O'].astype(np.float32), (0, 0), 9)
-    aze = cv2.GaussianBlur((CLS['lB'] | CLS['Gr'] | CLS['rA'] | CLS['W']).astype(np.float32), (0, 0), 9)
-    part = (m & (orange > aze)).astype(np.uint8)
-    k, pl, ps, _ = cv2.connectedComponentsWithStats(part, connectivity=4)
-    if k > 1:
-        big = 1 + int(np.argmax(ps[1:, cv2.CC_STAT_AREA]))
-        new_id = int(lab.max()) + 1
-        lab[(pl == big) & m] = new_id
-        # leftovers of the orange mask go back to the parent region
-    lab = grow(np.where(lab > 0, lab, 0))
-
-# ------------------------------------------------ split Nagorno-Karabakh
-# On the source map Karabakh is a single closed outline: its inner lines (two dark line fragments
-# in the southern band, the dark seams along the stripe edges and the outlined white chevron) do not
-# form closed areas, so the steps above keep it as one region. For the game every visible part must
-# be a separate province, so the region is divided by a seeded priority flood whose relief is the
-# strength of the visible lines: basins grow from one seed per part and meet exactly on those lines.
-import heapq
-
-NK_POINT = (869, 738)
-NK_SEEDS = [
-    # (id, name, seed x, seed y)
-    ('NK_01', 'Карабах · Север', 885, 680),
-    ('NK_02', 'Карабах · Запад', 825, 728),
-    ('NK_03', 'Карабах · Восток', 905, 732),
-    ('NK_04', 'Карабах · Юго-запад', 828, 772),
-    ('NK_05', 'Карабах · Юг', 870, 790),
-    ('NK_06', 'Карабах · Юго-восток', 922, 778),
-]
-
-
-def split_region(lab, point, seeds):
-    region = label_at(*point)
-    m = lab == region
-    # relief: per-channel black-hat (real dark lines) and max-channel black-hat (seams, outlines)
-    relief = np.maximum(bh_ch_d, 2.0 * bh_mx_d)
-    relief = cv2.GaussianBlur(relief, (0, 0), 0.8)
-    # the outlined white chevron of the flag is a visible divider: make its centre line a ridge so
-    # the parts on both sides meet in its middle instead of one part running along the whole band
-    white = ((a.min(axis=2) > 200) & m).astype(np.uint8)
-    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    wd = cv2.distanceTransform(white, cv2.DIST_L2, 5)
-    relief = np.where(white > 0, 150.0 + 20.0 * wd, relief).astype(np.float32)
-    out = np.zeros_like(lab)
-    heap = []
-    new_ids = []
-    base = int(lab.max()) + 1
-    for k, (_, _, sx, sy) in enumerate(seeds):
-        if not m[sy, sx]:
-            raise SystemExit(f'NK seed {seeds[k][0]} ({sx},{sy}) lies outside the Karabakh region')
-        nid = base + k
-        new_ids.append(nid)
-        out[sy, sx] = nid
-        heapq.heappush(heap, (0.0, sx, sy, nid))
-    while heap:
-        pr, x, y, nid = heapq.heappop(heap)
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < W and 0 <= ny < H and m[ny, nx] and not out[ny, nx]:
-                out[ny, nx] = nid
-                heapq.heappush(heap, (float(relief[ny, nx]), nx, ny, nid))  # Meyer flooding
-    # every part must stay one connected piece (tiny detached crumbs go to the neighbour)
-    for nid in new_ids:
-        part = (out == nid).astype(np.uint8)
-        k, pl, ps, _ = cv2.connectedComponentsWithStats(part, connectivity=4)
-        if k > 2:
-            big = 1 + int(np.argmax(ps[1:, cv2.CC_STAT_AREA]))
-            out[(part > 0) & (pl != big)] = 0
-    lab = np.where(m, out, lab)
-    lab = grow(np.where(lab > 0, lab, 0))
-    return lab, dict(zip(new_ids, seeds))
-
-
-lab, NK_PARTS = split_region(lab, NK_POINT, NK_SEEDS)
+    parent = {s: t for s, (_, t) in best.items() if s not in NK_PARTS}
+    # no chains: a fragment that absorbs another one this round keeps its own label
+    parent = {s: t for s, t in parent.items() if t not in parent}
+    if not parent:
+        break
+    remap = np.arange(lab.max() + 1)
+    for s, t in parent.items():
+        remap[s] = t
+    lab = remap[lab]
 
 ids = sorted(set(np.unique(lab).tolist()) - {0})
+if DUMP:
+    np.save(os.path.join(ROOT, 'tools_tmp', 'final_lab.npy'), lab)
+    print('regions:', len(ids), file=sys.stderr)
+    if '--seg-only' in sys.argv:
+        sys.exit(0)
 
-# --------------------------------------------------------------- countries
+# --------------------------------------------------------------- territories
+# Every pixel gets the nearest flag colour of the map; a province is described by its dominant colour
+# and its centroid. The rules below follow the layout of the source map (north -> south):
+# Russia (white/blue/red), Chechnya (dark green/white/red), Dagestan (light green/blue/red),
+# Abkhazia, Georgia (white with red crosses), South Ossetia (white/red/yellow), Polgonustan
+# (green/white, in place of Armenia), Azerbaijan (sky blue/red/green), Nakhchivan (Azerbaijani flag,
+# south-west exclave) and Nagorno-Karabakh (red/blue/orange with the white chevron).
+PALETTE = {
+    'W': (250, 250, 250), 'R': (222, 27, 23), 'r': (223, 5, 43), 'O': (215, 130, 32),
+    'Y': (242, 210, 44), 'g': (18, 130, 40), 'G': (22, 160, 65), 'D': (22, 88, 186),
+    'B': (1, 159, 221), 'P': (5, 125, 19),
+}
+pk = list(PALETTE)
+pal = np.array([PALETTE[k] for k in pk], np.int32)
+flat = a.reshape(-1, 3).astype(np.int32)
+cls = np.argmin(((flat[:, None, :] - pal[None, :, :]) ** 2).sum(axis=2), axis=1).reshape(H, W)
+bright = mx > 80  # ignore the dark dots of the lines
+
 COUNTRY_POINTS = {
-    # region containing these points -> fixed country
-    'abkhazia': [(158, 173)],
-    'south_ossetia': [(589, 316), (613, 262)],
-    'nakhchivan': [(700, 860), (670, 803)],
+    # regions containing these points -> fixed territory
+    'abkhazia': [(316, 264)],
+    'south_ossetia': [(662, 280), (639, 307), (679, 381)],
 }
 fixed = {}
 for cid, pts in COUNTRY_POINTS.items():
     for (x, y) in pts:
-        fixed[label_at(x, y)] = cid
+        fixed[int(lab[y, x])] = cid
 for nid in NK_PARTS:
     fixed[nid] = 'artsakh'
+
+
+def classify(dom, cx, cy, green):
+    # two greens in the north: Chechnya is darker (G ~130) than Dagestan (G ~145-165)
+    if dom in ('g', 'G') and cy < 330:
+        return 'chechnya' if green < 140 else 'dagestan'
+    if dom == 'D' and cx > 820 and cy < 430:
+        return 'dagestan'
+    if dom == 'R' and cx > 820 and 395 < cy < 545:
+        return 'dagestan'
+    if 425 < cx < 800 and cy < 285 and ((dom == 'D' and cy < 200) or (dom in ('R', 'r') and cx < 740) or (dom == 'W' and cy < 160)):
+        return 'russia'
+    if 690 <= cx <= 910 and ((dom == 'W' and 200 <= cy <= 300) or (dom == 'R' and 240 <= cy <= 350)):
+        return 'chechnya'
+    if dom in ('B', 'r', 'G') and cy > 750 and cx < 890:
+        return 'nakhchivan'
+    if dom == 'P' or (dom == 'W' and cy > 560 and cx < 900):
+        return 'armenia'
+    if dom in ('B', 'r', 'G') and cy > 440:
+        return 'azerbaijan'
+    if dom in ('W', 'R', 'r') and cy < 545:
+        return 'georgia'
+    raise SystemExit(f'cannot classify province at ({cx:.0f},{cy:.0f}), colour {dom}')
+
 
 props = {}
 for i in ids:
     m = lab == i
     ys, xs = np.nonzero(m)
-    fr = fractions(m)
+    counts = np.bincount(cls[m & bright], minlength=len(pk))
+    dom = pk[int(np.argmax(counts))]
     cx, cy = float(xs.mean()), float(ys.mean())
-    if i in fixed:
-        country = fixed[i]
-    elif fr['lB'] + fr['rA'] + (fr['Gr'] if cx > 600 else 0) > 0.5:
-        country = 'azerbaijan'
-    elif fr['dB'] > 0.3 or fr['O'] > 0.5 or (fr['rG'] > 0.5 and fr['W'] < 0.3 and cy > 470):
-        country = 'armenia'
-    else:
-        country = 'georgia'
+    greens = m & bright & np.isin(cls, [pk.index('g'), pk.index('G')])
+    green = float(a[..., 1][greens].mean()) if greens.any() else 0.0
+    country = fixed.get(i) or classify(dom, cx, cy, green)
     props[i] = dict(country=country, cx=cx, cy=cy, area=int(m.sum()), mask_bbox=(xs.min(), ys.min(), xs.max(), ys.max()))
+
+if DUMP:
+    letters = {'russia': 'Ru', 'chechnya': 'C', 'dagestan': 'D', 'abkhazia': 'A', 'georgia': 'G', 'south_ossetia': 'S',
+               'armenia': 'P', 'azerbaijan': 'z', 'nakhchivan': 'N', 'artsakh': 'K'}
+    with open(os.path.join(ROOT, 'tools_tmp', 'countries.txt'), 'w', encoding='utf-8') as f:
+        for y in range(0, H, 12):
+            f.write('%4d ' % y + ''.join(letters[props[int(lab[y, x])]['country']][-1] if lab[y, x] else ' ' for x in range(180, 1440, 6)) + '\n')
+
 
 # --------------------------------------------------------------- geometry
 def path_for(mask):
@@ -387,17 +356,18 @@ def shared_borders(lab):
                 arr = np.array(line, dtype=np.float32).reshape(-1, 1, 2) / 2.0
                 arr = cv2.approxPolyDP(arr, 0.8, False).reshape(-1, 2)
                 polylines.append([[round(float(x), 1), round(float(y), 1)] for x, y in arr])
-        lengths = len(s)
-        lines[key] = (lengths, polylines)
+        lines[key] = (len(s), polylines)
     return lines
 
 
 borders = shared_borders(lab)
 
-COUNTRY_ORDER = ['georgia', 'abkhazia', 'south_ossetia', 'armenia', 'azerbaijan', 'artsakh', 'nakhchivan']
+COUNTRY_ORDER = ['russia', 'chechnya', 'dagestan', 'abkhazia', 'georgia', 'south_ossetia', 'armenia', 'azerbaijan',
+                 'artsakh', 'nakhchivan']
 COUNTRY_SHORT = {
-    'georgia': 'Грузия', 'abkhazia': 'Абхазия', 'south_ossetia': 'Южная Осетия', 'armenia': 'Полгонустан',
-    'azerbaijan': 'Азербайджан', 'artsakh': 'Нагорный Карабах', 'nakhchivan': 'Нахичевань',
+    'russia': 'Россия', 'chechnya': 'Чечня', 'dagestan': 'Дагестан', 'georgia': 'Грузия', 'abkhazia': 'Абхазия',
+    'south_ossetia': 'Южная Осетия', 'armenia': 'Полгонустан', 'azerbaijan': 'Азербайджан',
+    'artsakh': 'Нагорный Карабах', 'nakhchivan': 'Нахичевань',
 }
 
 # stable, readable ids: country prefix + number from north-west to south-east
@@ -411,7 +381,7 @@ for c, lst in by_country.items():
     for k, i in enumerate(lst, 1):
         pid[i] = f'{c}-{k:02d}'
         names[i] = COUNTRY_SHORT[c] if len(lst) == 1 else f'{COUNTRY_SHORT[c]} · {k}'
-# Karabakh provinces keep the ids / names of their seeds (NK_01 ... NK_06)
+# Karabakh provinces keep the ids / names of their seeds (NK_01 ... NK_04)
 for nid, (sid, sname, _, _) in NK_PARTS.items():
     pid[nid] = sid
     names[nid] = sname
@@ -446,7 +416,7 @@ for (p, q), (ln, polylines) in sorted(borders.items(), key=lambda kv: (pid[kv[0]
     border_list.append({'a': pid[p], 'b': pid[q], 'length': ln, 'lines': polylines})
 
 data = {
-    'source': 'image.png',
+    'source': os.path.basename(SRC),
     'width': W,
     'height': H,
     'countries': COUNTRY_ORDER,
@@ -457,9 +427,14 @@ os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, 'w', encoding='utf-8') as f:
     json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
 
+# web copy of the map: lossless, so the game shows exactly the pixels of the source image
+WEB = os.path.join(ROOT, 'data', 'map.webp')
+Image.fromarray(a).save(WEB, 'WEBP', lossless=True, quality=100, method=6)
+if not np.array_equal(np.array(Image.open(WEB).convert('RGB')), a):
+    raise SystemExit('map.webp differs from the source image')
+
 summary = {}
 for p in provinces:
-    summary.setdefault(p['country'], 0)
-    summary[p['country']] += 1
+    summary[p['country']] = summary.get(p['country'], 0) + 1
 print('provinces:', len(provinces), summary, file=sys.stderr)
 print('borders:', len(border_list), 'size KB:', os.path.getsize(OUT) // 1024, file=sys.stderr)

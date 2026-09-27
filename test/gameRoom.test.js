@@ -126,16 +126,29 @@ test('roll distribution matches the chance (no 95% cap for a big advantage)', ()
 
 test('Karabakh is split into separate provinces with their own ids, geometry and neighbours', () => {
   const nk = [...map.provinces.values()].filter((p) => p.country === 'artsakh');
-  assert.deepEqual(nk.map((p) => p.id).sort(), ['NK_01', 'NK_02', 'NK_03', 'NK_04', 'NK_05', 'NK_06']);
+  assert.deepEqual(nk.map((p) => p.id).sort(), ['NK_01', 'NK_02', 'NK_03', 'NK_04']);
   for (const p of nk) {
     assert.ok(p.area > 1000, `${p.id} has its own geometry`);
     assert.ok([...p.neighbors].some((n) => n.startsWith('NK_')), `${p.id} borders another Karabakh province`);
     assert.equal(room.provinces.get(p.id).owner, 'artsakh');
     assert.equal(room.provinces.get(p.id).originalOwner, 'artsakh');
   }
-  // not every Karabakh province touches Azerbaijan: the interior must be reached province by province
-  const frontline = room.frontline('azerbaijan', 'artsakh');
-  assert.ok(frontline.length > 0 && frontline.length < nk.length, `frontline ${frontline}`);
+  // the frontline is exactly the Karabakh provinces that touch Azerbaijani provinces on the map
+  // (on the new map all four parts reach the Azerbaijani outline)
+  const expected = nk.filter((p) => [...p.neighbors].some((n) => map.provinces.get(n).country === 'azerbaijan')).map((p) => p.id);
+  assert.deepEqual(room.frontline('azerbaijan', 'artsakh').sort(), expected.sort());
+});
+
+test('every territory of the new map is split into provinces; interior is reached province by province', () => {
+  const count = (c) => [...map.provinces.values()].filter((p) => p.country === c).length;
+  for (const c of ['russia', 'chechnya', 'dagestan', 'georgia', 'armenia', 'azerbaijan', 'nakhchivan', 'artsakh', 'south_ossetia']) {
+    assert.ok(count(c) > 1, `${c} consists of several provinces (${count(c)})`);
+  }
+  assert.equal(count('abkhazia'), 1, 'Abkhazia is one closed area on the map');
+  for (const p of map.provinces.values()) assert.ok(p.area >= 700, `${p.id} is a real area, not a speck (${p.area}px)`);
+  // Dagestan has provinces that do not touch Azerbaijan: they cannot be attacked directly
+  const front = room.frontline('azerbaijan', 'dagestan');
+  assert.ok(front.length > 0 && front.length < count('dagestan'), `frontline ${front.length}/${count('dagestan')}`);
 });
 
 test('Karabakh is captured one province at a time; full conquest only after the last one', () => {

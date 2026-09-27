@@ -181,7 +181,7 @@ export function renderProvincePopup(app) {
   setHtml(pop, `
     <div class="pp-head">${flagHtml(owner)}<div><h3>${esc(p.name)}</h3><div class="muted" style="font-size:12px">Владелец: ${esc(countryName(owner))}${owner !== p.country ? ` · исходно: ${esc(countryName(p.country))}` : ''}</div></div>
     <button type="button" class="btn btn-ghost btn-sm pp-close" data-act="close-pop" aria-label="Закрыть">✕</button></div>
-    <div class="muted" style="font-size:12px">ID: ${esc(p.id)} · соседних провинций: ${p.neighbors.length}</div>
+    <div class="muted" style="font-size:12px">Войска владельца: <b>${fmt(state.countries[owner]?.troops ?? 0)}</b> · ID: ${esc(p.id)} · соседних провинций: ${p.neighbors.length}</div>
     ${action}`);
 }
 

@@ -26,11 +26,19 @@ function smallCross(cx, cy) {
   return `<rect x="${cx - 0.5}" y="${cy - 2}" width="1" height="4" fill="#ff0000"/><rect x="${cx - 2}" y="${cy - 0.5}" width="4" height="1" fill="#ff0000"/>`;
 }
 
-// Colours are sampled from the source map (image.png) so re-painted territory matches it.
+// Colours are sampled from the source map (`новая карта.png`) so re-painted territory matches it.
 const FLAGS = {
+  russia: svg(stripes(['#fefefe', '#0d45b4', '#df1b17'])),
+  // green / thin white / red, as drawn on the map (with the white ornament band at the hoist)
+  chechnya: svg(
+    `<rect width="${W}" height="${H}" fill="#118227"/><rect y="13" width="${W}" height="1.2" fill="#fefefe"/>` +
+      `<rect y="14.2" width="${W}" height="5.8" fill="#df1714"/><rect x="0" y="0" width="3" height="${H}" fill="#fefefe"/>` +
+      `<path d="M1.5 1 l1 1.5 -1 1.5 -1 -1.5 z M1.5 5.5 l1 1.5 -1 1.5 -1 -1.5 z M1.5 10 l1 1.5 -1 1.5 -1 -1.5 z M1.5 14.5 l1 1.5 -1 1.5 -1 -1.5 z" fill="#d8a200"/>`,
+  ),
+  dagestan: svg(stripes(['#179b37', '#1658bb', '#e41c18'])),
   georgia: svg(
     `<rect width="${W}" height="${H}" fill="#f9f9f9"/>` +
-      `<rect x="13" y="0" width="4" height="${H}" fill="#e40315"/><rect x="0" y="8" width="${W}" height="4" fill="#e40315"/>` +
+      `<rect x="13" y="0" width="4" height="${H}" fill="#e40212"/><rect x="0" y="8" width="${W}" height="4" fill="#e40212"/>` +
       smallCross(6.5, 4) + smallCross(23.5, 4) + smallCross(6.5, 16) + smallCross(23.5, 16),
   ),
   abkhazia: svg(
@@ -42,15 +50,15 @@ const FLAGS = {
         return star(6.2 + 4.4 * Math.cos(a) * -1, 4.9 + 3.4 * Math.sin(a), 0.55, 5, '#fff');
       }).join(''),
   ),
-  south_ossetia: svg(stripes(['#f9f9f9', '#de0212', '#fcd504'])),
+  south_ossetia: svg(stripes(['#fefefe', '#dc0212', '#fcd52c'])),
   armenia: null, // Polgonustan: raster flag, see FLAG_IMAGES below
   azerbaijan: svg(
-    stripes(['#01a0d6', '#df022d', '#08a052']) +
-      `<circle cx="14" cy="10" r="3" fill="#fff"/><circle cx="14.8" cy="10" r="2.45" fill="#df022d"/>` +
+    stripes(['#01a0dd', '#df042a', '#12a84b']) +
+      `<circle cx="14" cy="10" r="3" fill="#fff"/><circle cx="14.8" cy="10" r="2.45" fill="#df042a"/>` +
       star(18, 10, 1.5, 8, '#fff'),
   ),
   artsakh: svg(
-    stripes(['#d8050a', '#0133a9', '#f89b05']) +
+    stripes(['#e0042a', '#01319f', '#fb9604']) +
       `<path d="M30 3 h-4 v2 h-2 v2 h-2 v2 h-2 v2 h2 v2 h2 v2 h2 v2 h4 v-2 h-2 v-2 h-2 v-2 h-2 v-2 h2 v-2 h2 v-2 h2 z" fill="#fff"/>`,
   ),
   nakhchivan: null,
